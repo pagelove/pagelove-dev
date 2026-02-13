@@ -1,0 +1,13 @@
+{
+  "name": "pagelove",
+  "description": "Creates Pagelove apps",
+  "version": "0.1.0",
+  "author": {
+    "name": "Pagelove Ltd",
+    "email": "hello@pagelove.team"
+  },
+  "homepage": "https://github.com/pagelove/pagelove-plugin",
+  "repository": "https://github.com/pagelove/pagelove-plugin",
+  "license": "MIT",
+  "keywords": ["pagelove", "html", "http"]
+}
