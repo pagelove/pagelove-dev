@@ -1,13 +1,13 @@
 {
-  "name": "pagelove",
-  "description": "Creates Pagelove apps",
-  "version": "0.1.0",
+  "name": "pagelove-dev",
+  "description": "Create Pagelove apps",
+  "version": "0.1.1",
   "author": {
     "name": "Pagelove Ltd",
-    "email": "hello@pagelove.team"
+    "email": "hello@page.love"
   },
-  "homepage": "https://github.com/pagelove/pagelove-plugin",
-  "repository": "https://github.com/pagelove/pagelove-plugin",
+  "homepage": "https://github.com/pagelove/pagelove-dev",
+  "repository": "https://github.com/pagelove/pagelove-dev",
   "license": "MIT",
   "keywords": ["pagelove", "html", "http"]
 }
