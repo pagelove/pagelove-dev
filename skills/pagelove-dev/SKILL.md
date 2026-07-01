@@ -1,510 +1,342 @@
 ---
 name: pagelove-dev
-description: "Use when building, creating, or modifying a Pagelove application, or when the working directory is a WebDAV mount for a pagelove.cloud site. Also use when another skill identifies Pagelove as the target platform."
+description: Use when building, creating, modifying, or deploying a Pagelove web app — including when you have a Pagelove console API key, need to discover a deployment target or host, or are deploying files to a pagelove host over WebDAV. Also use when another skill identifies Pagelove as the target platform. This skill shouldn't be used to make use of an application running on the Pagelove platform.
 ---
 
-# Create Pagelove apps
+# Building & Deploying Pagelove Applications
+
+## Configuration
+
+Edit these when the endpoints change. They are the ONLY environment-specific
+values in this skill.
+
+- `CONSOLE_URL` = `https://config.onpagelove.com`
+- `DOCS_URL` = `https://docs.pagelove.com/`
+
+`CONSOLE_URL` is the Pagelove console origin. `DOCS_URL` is the single
+all-in-one documentation page (the entire spec on one page) — fetch THIS URL and
+focus on the relevant section; do not invent per-feature sub-URLs.
 
 ## Overview
 
-Pagelove is a web platform where HTML documents ARE the application. There is no separate backend — HTTP verbs operate directly on DOM elements via CSS selectors, and the platform handles concurrency, authorization, and validation.
+Pagelove is a web platform where **HTML documents ARE the application**. There is
+no separate backend — HTTP verbs operate on DOM elements via CSS selectors, and
+the platform handles storage, composition, access control, validation, and
+real-time updates.
 
-**Before writing any Pagelove-specific markup, fetch the relevant spec from `https://docs.pagelove.org/`.**
+You drive everything in this skill with `curl` and one credential: the user's
+**console API key** (`pk_…`), sent as `Authorization: Bearer <key>`. The same key
+reads/writes the console AND authors files on a host over WebDAV.
 
-## Core Mental Model
+## Step 1 — Authenticate (do this first)
 
-- A **resource** is a file (HTML page)
-- HTTP methods target **elements within a page** using `Range: selector=<css>` headers
+Ask the user for their Pagelove console API key (starts with `pk_`). If the user doesn't
+have an API key, ask them to create one by going to the credentials page in the console,
+and hitting the "Generate API Key" button, before copying and pasting it into the session.
+One way or another, hold the API key for the session only: **never write it to a file, never
+echo it back, never commit it.** Set it (and the constants) for the session:
+
+```bash
+CONSOLE_URL='https://config.onpagelove.com'
+KEY='Authorization: Bearer pk_REPLACE_WITH_USER_KEY'
+```
+
+Validate it:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$CONSOLE_URL/console/index.html" -H "$KEY"
+```
+
+- `200` → key works, continue.
+- `401` → tell the user the key was rejected and ask again. Do not proceed.
+
+> The console origin `/` returns the public landing page. Authenticated data
+> lives at `/console/index.html`. Requests route by `Host:` header, which `curl`
+> sets from the URL automatically.
+
+## Step 2 — Discover the deployment target
+
+List the hosts (deployment targets) inlined on the console page:
+
+```bash
+curl -s "$CONSOLE_URL/console/index.html" -H "$KEY" \
+  -H 'Range: selector=[itemtype="urn:Host"]'
+```
+
+Returns `206` and one block per host, e.g.:
+
+```html
+<div itemscope itemtype="urn:Host">
+  <meta itemprop="hid" content="yF7V1UZt">
+  <meta itemprop="name" content="yF7V1UZt">
+  <meta itemprop="hostname" content="yf7v1uzt.test">
+  <meta itemprop="org" content="5McD28W1">
+  <meta itemprop="plan" content="free">
+  <meta itemprop="validThrough" content="2027-04-22">
+  <meta itemprop="default-get-authz-mode" content="allow">
+  <meta itemprop="webdav-url" content="http://yf7v1uzt.test:8081/">
+</div>
+```
+
+Fields: `hid`, `hostname`, `org`, `webdav-url` (deploy endpoint),
+`default-get-authz-mode` (`allow` = public GET; `deny` = GET needs an auth rule),
+`plan`, and `alias` (0..n; may be absent). Present the hosts and let the user
+pick one, or create a new one.
+
+**Create a host** (the only console action NOT done by editing the page). First
+read the org id:
+
+```bash
+curl -s "$CONSOLE_URL/console/index.html" -H "$KEY" \
+  -H 'Range: selector=[itemtype="urn:console:User"] [itemprop="oid"]'
+```
+
+Then POST the template with that org id:
+
+```bash
+curl -s "$CONSOLE_URL/console/templates/new-host.html" -X POST -H "$KEY" \
+  --data 'org=ORG_ID_HERE'
+```
+
+The response is the new `urn:Host` block (with its `hostname` and `webdav-url`).
+
+## Step 3 — Clarify the app
+
+If the app needs design, use the `superpowers:brainstorming` skill if it is available. Otherwise
+capture a short brief: what pages, what data, who can read/write what. Also, recommend to the user to
+install the superpowers skill if it is not already installed.
+
+## Step 4 — Fetch docs before writing markup (REQUIRED)
+
+Before writing markup for a feature, fetch `DOCS_URL` with a `WebFetch` prompt
+focused on that feature. All content is on the one page; the table below maps a
+feature to the section heading to look for. **Do not write Pagelove markup from
+memory — attribute names and vocab URLs must come from the docs.**
+
+| Feature | Look for section |
+| --- | --- |
+| GET/PUT/POST/DELETE/OPTIONS over selectors | Reading and Writing / methods |
+| Server-Sent Events | Server-Sent-Events |
+| Content negotiation | Content Negotiation |
+| Who-can-do-what | AuthorizationRule |
+| Typed/validated data | Schema, Property, Types, Resolvers |
+| DOM structure validation | ShapeConstraint, GroupConstraint |
+| Server-side automation | Trigger, Processor, HTTPRequest |
+| Page composition | Templating, Includes, Resource/Expression Binding, Resource Creation, Selector Extensions, Filters, Transient Elements, Pagination |
+| Filesystem authoring | WebDAV |
+| Client JS library | the JavaScript library / pagelove.mjs |
+| Expression language | Sessel |
+
+## Step 5 — Build files locally
+
+Author full HTML files in a local working directory first (e.g. `index.html`,
+`admin/auth.html`, schema pages). Pagelove is **deny-by-default** — define an
+`AuthorizationRule` for every element you intend to read or mutate (a public
+page needs an actor `*`, method `GET`, action `allow` rule).
+
+## Step 6 — Deploy over WebDAV
+
+Deploy to the host's `webdav-url` (e.g. `http://<hostname>:8081/`) using the
+same API key. WebDAV writes **whole files and preserves formatting** — this is
+the deploy path. (Do NOT mount the host or use element-level `:80` PUTs for
+file authoring; element-level `:80` PUTs re-serialize and flatten to one line.)
+
+```bash
+WEBDAV='http://yf7v1uzt.test:8081/'   # the host's webdav-url, verbatim
+
+# Inspect what's there (read-only)
+curl -s -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'
+
+# Create a directory before putting files into it
+curl -s -X MKCOL "${WEBDAV}admin/" -H "$KEY"
+
+# Write a whole file (formatting preserved)
+curl -s -X PUT "${WEBDAV}index.html" -H "$KEY" \
+  -H 'Content-Type: text/html' --data-binary @index.html
+```
+
+Deploy failure handling:
+- `401 Bearer token rejected` → this console's WebDAV does not yet accept the API
+  key. Tell the user the deploy capability isn't enabled on this console; stop.
+- `409 Conflict` → a parent collection is missing; `MKCOL` it first, then retry.
+- Any other non-2xx → report the HTTP status and body; do not assume success.
+
+Mutating a host changes a shared deployment target — confirm with the user before
+the first `PUT`/`MKCOL`.
+
+## Step 7 — Verify
+
+Read the file back over WebDAV (most reliable across environments):
+
+```bash
+curl -s "${WEBDAV}index.html" -H "$KEY" | head
+curl -s -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'   # file now listed
+```
+
+If the host is publicly served, you can also GET the live site
+(`curl -s -o /dev/null -w '%{http_code}\n' "http://<hostname>/"`), but in some
+dev setups the `:80` edge proxy rejects unregistered hostnames — prefer the
+WebDAV read-back. Report results honestly, including any non-2xx response.
+
+## Step 8 — Host-config tweaks (optional)
+
+Modify host settings by editing the inlined block on `/console/index.html` (NOT
+`/organizations/...`). Confirm with the user before mutating a shared host.
+
+```bash
+# Change a single setting (replace its element)
+curl -s -X PUT "$CONSOLE_URL/console/index.html" -H "$KEY" \
+  -H 'Range: selector=[itemtype="urn:Host"] [itemprop="default-get-authz-mode"]' \
+  -H 'Content-Type: text/html' \
+  --data '<meta itemprop="default-get-authz-mode" content="deny">'
+```
+
+Add an `alias` where none exists with `POST` (insert a new `<meta itemprop="alias">`
+into the host block); change an existing one with `PUT` against its selector.
+Verify the exact selector against the live block first.
+
+## Mental model (for writing markup)
+
+- A **resource** is an HTML page; HTTP methods target **elements** via
+  `Range: selector=<css>`.
 - **AuthorizationRule** microdata controls who can do what to which elements
-- **ShapeConstraint** microdata validates DOM structure on mutations
-- **SSPI** (includes, templating, resource binding) runs server-side before delivery
-- **Pagelove Primitives** is a JS library that attaches HTTP methods to DOM elements
-
-## Documentation Map
-
-Fetch these pages from `https://docs.pagelove.org/` as needed:
-
-| Need                 | Fetch                                                                                                           |
-| -------------------- | --------------------------------------------------------------------------------------------------------------- |
-| HTTP method details  | `/http/GET-method/`, `/http/PUT-method/`, `/http/POST-method/`, `/http/DELETE-method/`, `/http/OPTIONS-method/` |
-| Authorization rules  | `/schema/AuthorizationRule/`                                                                                    |
-| Shape constraints    | `/schema/ShapeConstraint/`                                                                                      |
-| Group membership     | `/schema/GroupMembership/`                                                                                      |
-| Server-side includes | `/sspi/Includes/`                                                                                               |
-| Resource binding     | `/sspi/Resource-Binding/`                                                                                       |
-| Templating (Liquid)  | `/sspi/Templating/`                                                                                             |
-| Resource creation    | `/sspi/Resource-Creation/`                                                                                      |
-| JS Primitives API    | `/JavaScript/`                                                                                                  |
-| WebDAV access        | `/WebDAV/`                                                                                                      |
-
-**REQUIRED: Fetch the relevant doc pages before writing markup for that feature.**
-
-## Default Application Structure
-
-New apps start with two files:
-
-```
-/index.html            — application page
-/admin/
-  auth.html            — AuthorizationRule + ShapeConstraint microdata
-```
-
-- `/admin/auth.html` is inaccessible by default (deny-by-default — no auth rule grants access to it)
-- AuthorizationRule elements are discovered wherever they exist across the site — they are not limited to `auth.html` or any specific file. The platform finds and evaluates all AuthorizationRule microdata regardless of which page contains it. The `admin/auth.html` convention is just organizational convenience.
-- SSPI features (includes, templating, resource binding) are added only when needed
-- Additional pages go at whatever paths make sense for the app
-
-## Implementation Workflow
-
-Follow this order — auth rules must exist before mutations work:
-
-1. **Fetch docs** for features being used
-2. **Scaffold or assess** — create structure if empty, read existing files if not
-3. **Build application HTML** — semantic markup with schema.org microdata, IDs on containers
-4. **Define authorization rules** — deny-by-default, allow only what's needed
-5. **Define shape constraints** — for any elements accepting POSTed content
-6. **Add client-side JS** — Pagelove Primitives for interactivity
-7. **Test via HTTP** — curl against the live site after each step
-
-## Critical Reference: Correct Syntax
-
-These are the most common errors. Get these right:
-
-### Schema URLs (NOT pagelove.cloud)
-
-```
-https://pagelove.org/AuthorizationRule
-https://pagelove.org/ShapeConstraint
-https://pagelove.org/GroupMembership
-```
-
-### AuthorizationRule Properties
-
-Properties are: `actor`, `resource`, `method`, `selector`, `action` (allow/deny).
-Multiple methods use separate elements, NOT comma-separated:
-
-```html
-<tr itemscope itemtype="https://pagelove.org/AuthorizationRule">
-  <td itemprop="actor">*</td>
-  <td itemprop="resource">/index.html</td>
-  <td>
-    <ul>
-      <li itemprop="method">PUT</li>
-      <li itemprop="method">DELETE</li>
-    </ul>
-  </td>
-  <td itemprop="selector">li</td>
-  <td itemprop="action">allow</td>
-</tr>
-```
-
-### Liquid Interpolation in AuthorizationRules
-
-All AuthorizationRule properties support Liquid template expressions, evaluated per-request against the request context. This requires no SSPI namespace declaration — interpolation is implicit on AuthorizationRule elements. Liquid filters work normally within these expressions.
-
-This enables dynamic authorization patterns — scoping rules by resource path, element ownership, or any combination. For example, this rule restricts staff members to their own page and their own records:
-
-```html
-<tr itemscope itemtype="https://pagelove.org/AuthorizationRule">
-  <td itemprop="actor">staff</td>
-  <td itemprop="resource">
-    /team/{{request.auth.claims.name | split: " " | first | downcase }}.html
-  </td>
-  <td>
-    <ul>
-      <li itemprop="method">GET</li>
-      <li itemprop="method">POST</li>
-      <li itemprop="method">PUT</li>
-    </ul>
-  </td>
-  <td itemprop="selector">
-    [id][itemtype="http://pagelove.com/TeamMember"]:has([itemprop=owner][content='{{request.auth.claims.email}}'])
-    [itemprop]
-  </td>
-  <td itemprop="action">allow</td>
-</tr>
-```
-
-Here the resource is templated to resolve to a per-user page (e.g., a staff member named "Jane Smith" can only access `/team/jane.html`), and the selector further restricts mutations to elements where the owner itemprop matches their email. Both expressions are expanded at evaluation time per request.
-
-For ownership patterns to hold, POSTed elements must include the ownership property — enforce this with a ShapeConstraint:
-
-```html
-<div hidden itemscope itemtype="https://pagelove.org/ShapeConstraint">
-  <span itemprop="selector"
-    >#team [itemtype="http://pagelove.com/TeamMember"]</span
-  >
-  <span itemprop="constraint">:has([itemprop=owner])</span>
-</div>
-```
-
-### ShapeConstraint Properties
-
-Properties are: `resource` (optional), `selector`, `constraint` (repeatable):
-
-```html
-<div hidden itemscope itemtype="https://pagelove.org/ShapeConstraint">
-  <span itemprop="selector">#my-list li</span>
-  <span itemprop="constraint">:has([itemprop=name])</span>
-  <span itemprop="constraint">:has([itemprop=email])</span>
-</div>
-```
-
-### Pagelove Primitives JS
-
-Two separate modules. PLDocument is instantiated, not static:
-
-```javascript
-import { PLDocument } from "https://cdn.pagelove.net/js/pagelove-primitives/1a5a161/index.mjs";
-import { DOMSubscriber } from "https://cdn.pagelove.net/js/dom-subscriber/cde4007/index.mjs";
-
-const doc = new PLDocument();
-doc.OPTIONS();
-```
-
-**`doc.OPTIONS()` discovers HTTP capabilities and attaches `.PUT()`, `.POST()`, `.DELETE()` to DOM elements. It does NOT provide user/auth information.** Do not attempt to read `options.user` or similar — there is no such property. For auth-aware UI, use Liquid templates instead (see below).
-
-### Auth-Aware UI: Use Liquid Templates, Not JS
-
-PLDocument.OPTIONS() does not expose the authenticated user. To show/hide UI based on auth state, use Liquid templates with `pagelove:template="text/liquid"`:
-
-```html
-<div xmlns:pagelove="https://pagelove.org/1.0" pagelove:template="text/liquid">
-  {% if request.auth.username %}
-  <span>{{ request.auth.claims.name }}</span> |
-  <a href="/auth/logout">Logout</a>
-  {% else %}
-  <a href="/auth/login">Login</a>
-  {% endif %}
-</div>
-```
-
-Available Liquid variables for auth:
-
-- `request.auth.username` — truthy when authenticated
-- `request.auth.claims.name` — user's display name
-- `request.auth.claims.email` — user's email address
-- `request.auth.roles` — user's roles/groups
-
-### DOMSubscriber API
-
-Subscribes to elements matching a selector. Callback receives the element:
-
-```javascript
-DOMSubscriber.subscribe(document, "button.delete", (button) => {
-  button.addEventListener("click", () => {
-    button.closest("li").DELETE();
-  });
-});
-```
-
-### SSPI Namespace
-
-Documents using SSPI features must declare the namespace:
-
-```html
-<html lang="en" xmlns:pagelove="https://pagelove.org/1.0"></html>
-```
-
-## Canonical Example: Todo List
-
-Source: `https://todo-list.pagelove.cloud/`
-
-### index.html (application page)
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
-    <title>Pagelove Todo List Example</title>
-    <style>
-      li:has(> input:checked) {
-        text-decoration: line-through;
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Pagelove Todo Example</h1>
-      <p>This todo list application is running on Pagelove.</p>
-      <h2>Todo List</h2>
-      <ul id="todo-list">
-        <li itemscope itemtype="http://schema.org/ListItem">
-          <input type="checkbox" />
-          <span itemprop="name">Build something great with Pagelove</span>
-          <button class="delete">🗑</button>
-        </li>
-      </ul>
-      <form>
-        <input type="text" name="item" placeholder="New item..." />
-        <button>Add</button>
-      </form>
-    </main>
-
-    <script type="module">
-      import { PLDocument } from "https://cdn.pagelove.net/js/pagelove-primitives/1a5a161/index.mjs";
-      import { DOMSubscriber } from "https://cdn.pagelove.net/js/dom-subscriber/cde4007/index.mjs";
-
-      document.addEventListener("change", (e) => {
-        if (e.target.checked) {
-          e.target.setAttribute("checked", "true");
-        } else {
-          e.target.removeAttribute("checked");
-        }
-        if (e.target.parentNode.PUT) e.target.parentNode.PUT();
-      });
-
-      document.querySelector("form").addEventListener("submit", (e) => {
-        e.preventDefault();
-        const itemText = e.target.item.value.trim();
-        if (itemText.length === 0) return;
-        const li = document.createElement("li");
-        li.setAttribute("itemscope", "");
-        li.setAttribute("itemtype", "http://schema.org/ListItem");
-        li.innerHTML = `<input type="checkbox"> <span itemprop="name">${itemText}</span> <button class='delete'>&#128465;</button>`;
-        document.getElementById("todo-list").POST(li);
-        e.target.reset();
-      });
-
-      DOMSubscriber.subscribe(document, "button.delete", (e) => {
-        e.addEventListener("click", (e) => {
-          const li = e.target.closest("li");
-          li.DELETE();
-        });
-      });
-
-      const doc = new PLDocument();
-      doc.OPTIONS();
-    </script>
-  </body>
-</html>
-```
-
-### admin/auth.html (authorization + constraints)
-
-```html
-<!DOCTYPE html>
-<html lang="en" xmlns:pagelove="https://pagelove.org/1.0">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Authorization Rules</title>
-  </head>
-  <body>
-    <main>
-      <h1>Authorization Rules</h1>
-      <table>
-        <thead>
-          <tr>
-            <th>Actor</th>
-            <th>Resource</th>
-            <th>Method</th>
-            <th>Selector</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr itemscope itemtype="https://pagelove.org/AuthorizationRule">
-            <td itemprop="actor">*</td>
-            <td itemprop="resource">/index.html</td>
-            <td>
-              <ul>
-                <li itemprop="method">GET</li>
-              </ul>
-            </td>
-            <td itemprop="selector"></td>
-            <td itemprop="action">allow</td>
-          </tr>
-          <tr itemscope itemtype="https://pagelove.org/AuthorizationRule">
-            <td itemprop="actor">*</td>
-            <td itemprop="resource">/index.html</td>
-            <td>
-              <ul>
-                <li itemprop="method">PUT</li>
-                <li itemprop="method">DELETE</li>
-              </ul>
-            </td>
-            <td itemprop="selector">li, input</td>
-            <td itemprop="action">allow</td>
-          </tr>
-          <tr itemscope itemtype="https://pagelove.org/AuthorizationRule">
-            <td itemprop="actor">*</td>
-            <td itemprop="resource">/index.html</td>
-            <td>
-              <ul>
-                <li itemprop="method">POST</li>
-              </ul>
-            </td>
-            <td itemprop="selector">ul</td>
-            <td itemprop="action">allow</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div hidden itemscope itemtype="https://pagelove.org/ShapeConstraint">
-        <span itemprop="selector">#todo-list li</span>
-        <span itemprop="constraint">:has(input[type=checkbox])</span>
-        <span itemprop="constraint">:has([itemprop=name])</span>
-        <span itemprop="constraint">:has(button.delete)</span>
-      </div>
-    </main>
-  </body>
-</html>
-```
-
-### Why It Works This Way
-
-- **`ul#todo-list`**: ID makes it a stable POST target
-- **`li, input` for PUT**: checkbox changes AND item updates both need PUT
-- **ShapeConstraint on `#todo-list li`**: prevents malformed items from being POSTed
-- **`DOMSubscriber`**: handles delete buttons on elements that don't exist yet (POSTed later)
-- **`doc.OPTIONS()` on load**: discovers capabilities, attaches PUT/POST/DELETE to matching elements
-- **`if (e.target.parentNode.PUT)`**: guard — only call PUT if capability was discovered
-
-## Important Behavior Notes
-
-### PUT sends full outerHTML
-
-`element.PUT()` sends the element's entire `outerHTML` to the server. Any hidden UI elements (edit forms, temporary state) inside the element WILL be included. Design elements so that their resting DOM state is clean — avoid nesting hidden editing UI inside data elements that will be PUT.
-
-### Shape constraints enforce data integrity, not UI structure
-
-Constrain what matters for data correctness: `itemprop` attributes, required semantic children. Avoid constraining CSS classes or UI-only elements — those are presentation concerns that should be free to change.
-
-### Resource Binding namespace requires `/1.0/`
-
-The Resource namespace MUST include `/1.0/`:
-
-```html
-<html xmlns:resource="https://pagelove.org/1.0/Resource"></html>
-```
-
-NOT `https://pagelove.org/Resource` (attributes won't be stripped and binding won't work).
-
-### Liquid templates and HTML `<table>` are incompatible
-
-HTML foster parenting moves non-table content (like Liquid `{% %}` tags) outside `<table>/<tbody>` before Liquid processes them, causing "Unknown variable" errors. **Use CSS grid with `<div>` elements instead of `<table>` for any template-driven listings.**
-
-### Wrap JavaScript in `{% raw %}` when body uses Liquid
-
-When `<body>` has `pagelove:template="text/liquid"`, Liquid processes the ENTIRE body including `<script>` tags. Template literals (`${}`) and any `{{ }}` in JS will be mangled. Wrap scripts:
-
-```html
-{% raw %}
-<script type="module">
-  // JS with template literals is safe here
-</script>
-{% endraw %}
-```
-
-### Resource creation: form and template are separate pages
-
-The form page is a plain HTML file that POSTs to the template. The template uses `<base href>` to determine the new page's URL. A successful POST returns 301 redirect to the new resource. Authorization needs BOTH:
-
-- POST on the template path (e.g., `/templates/new-bug.html`)
-- PUT on the target path (e.g., `/bugs/*`) without selector (for the resource creation write)
-
-### Template request object structure
-
-In Liquid templates for resource creation, the request object provides:
-
-- `request.body.<field>` — form field values
-- `request.auth.claims.name` — authenticated user's display name
-- `request.auth.roles` — user's roles/groups
-- `request.method`, `request.path`, `request.headers` — HTTP metadata
-  Note: there is NO `request.actor` property.
-
-### The `users` group
-
-All authenticated users automatically belong to the `users` group. Use `users` as the actor value in AuthorizationRule for "any authenticated user" rules.
-
-### Resource binding picks up template files
-
-If a template file contains microdata (e.g., `itemtype="http://schema.org/Report"`), resource binding will include it with raw Liquid tags as property values. Filter by checking the `@id` for template-specific strings — do NOT use `contains '{{' ` (breaks Liquid parser) or `{% if item.name %}` (unprocessed Liquid tags are truthy strings):
-
-```liquid
-{% for item in items %}
-{% unless item['@id'] contains 'request.body' %}
-    <!-- render item -->
-{% endunless %}
-{% endfor %}
-```
-
-### Writing files to WebDAV mounts
-
-The Write tool may truncate files on WebDAV mounts. Use bash heredocs instead:
-
-```bash
-cat > /path/to/webdav/file.html << 'HTMLEOF'
-<!DOCTYPE html>
-...
-HTMLEOF
-```
-
-## Testing with curl
-
-After each implementation step, verify with HTTP requests:
-
-```bash
-# Check capabilities
-curl -si https://myapp.pagelove.cloud/ -X OPTIONS \
-  -H "Accept: multipart/mixed" -H "Prefer: return=representation"
-
-# GET an element
-curl -si https://myapp.pagelove.cloud/ -H "Range: selector=#my-list"
-
-# POST a new element
-curl -si https://myapp.pagelove.cloud/ -X POST \
-  -H "Range: selector=#my-list" \
-  -H "Content-Type: text/html" \
-  -d '<li itemscope itemtype="http://schema.org/ListItem">...</li>'
-
-# PUT (replace) an element
-curl -si https://myapp.pagelove.cloud/ -X PUT \
-  -H "Range: selector=li:first-child" \
-  -H "Content-Type: text/html" \
-  -d '<li itemscope itemtype="http://schema.org/ListItem">...</li>'
-
-# DELETE an element
-curl -si https://myapp.pagelove.cloud/ -X DELETE \
-  -H "Range: selector=li:last-child"
-
-# Test shape constraint violation
-curl -si https://myapp.pagelove.cloud/ -X POST \
-  -H "Range: selector=#my-list" \
-  -H "Content-Type: text/html" \
-  -d '<li>malformed</li>'
-# Expected: 422 Unprocessable Content
-```
-
-## HTTP Response Codes
-
-| Code | Meaning                                                 |
-| ---- | ------------------------------------------------------- |
-| 200  | OK (OPTIONS)                                            |
-| 204  | No Content (successful DELETE)                          |
-| 206  | Partial Content (successful GET/PUT/POST with selector) |
-| 207  | Multi-Status (multipart OPTIONS)                        |
-| 404  | Resource not found                                      |
-| 416  | Invalid CSS selector                                    |
-| 422  | Shape constraint violated                               |
-
-## Common Mistakes
-
-| Mistake                                    | Correct                                                                    |
-| ------------------------------------------ | -------------------------------------------------------------------------- |
-| Schema URL `pagelove.cloud`                | `https://pagelove.org/AuthorizationRule`                                   |
-| Property `principal`/`verb`/`effect`       | `actor`/`method`/`action`                                                  |
-| `PLDocument.OPTIONS()` (static)            | `new PLDocument(); doc.OPTIONS()` (instance)                               |
-| Comma-separated methods `"PUT,DELETE"`     | Separate `<li itemprop="method">` per method                               |
-| `<meta itemprop>` for auth rules           | Use visible elements (`<td>`, `<span>`) with `itemprop`                    |
-| CDN at `pagelove.cloud`                    | `https://cdn.pagelove.net/js/pagelove-primitives/.../index.mjs`            |
-| DOMSubscriber in pagelove-primitives       | Separate import from `cdn.pagelove.net/js/dom-subscriber/.../index.mjs`    |
-| Missing SSPI namespace                     | `xmlns:pagelove="https://pagelove.org/1.0"` on `<html>` when using SSPI    |
-| Resource namespace `pagelove.org/Resource` | Must be `https://pagelove.org/1.0/Resource` (with `/1.0/`)                 |
-| Liquid tags inside `<table>`               | HTML foster parenting breaks them — use CSS grid `<div>` instead           |
-| JS template literals in Liquid body        | Wrap `<script>` in `{% raw %}...{% endraw %}`                              |
-| `request.actor` in templates               | Use `request.auth.claims.name` for user identity                           |
-| Using Write tool on WebDAV mount           | Files may truncate — use bash heredocs instead                             |
-| `doc.OPTIONS()` for user info              | OPTIONS doesn't provide auth info — use Liquid templates for auth-aware UI |
+  (deny-by-default).
+- **Schema** + **Property** validate typed data; **ShapeConstraint** validates
+  DOM structure on mutations.
+- **Trigger**/**Processor** run **Sessel** expressions before/after a request.
+- **pagelove.mjs** gives declarative two-way binding; **SSE** streams mutations.
+- Microdata vocab URLs are `https://pagelove.org/<Thing>` (e.g.
+  `AuthorizationRule`, `Schema`, `Property`, `Trigger`, `Processor`, `Sessel`).
+
+Fetch `DOCS_URL` for exact syntax — do not guess attribute names.
+
+## Verified patterns & gotchas
+
+Battle-tested on real builds. Still fetch `DOCS_URL` for syntax — these are the
+things the docs under-state or get subtly wrong.
+
+### Composition runs with ELEVATED rights
+
+A `<p:stamp>`/`<p:include>`/binding composes a page by reading other documents
+**even when the requester cannot directly GET them**. (Verified: a public page
+that stamps a doc which denies anonymous GET still renders that doc for anon.)
+
+- This is the idiom for **private data + curated views**: keep raw data private
+  with `deny * GET /data/*` (+ `allow :username GET /data/*` for the editor), and
+  the composed pages (param route, home, index) still render because they compose
+  server-side. Visitors can only reach data through the views you build.
+- Note: this contradicts the Resource-Binding doc's "binding succeeds only if the
+  request has access" line — empirically composition is **not** requester-scoped.
+
+### Write-through authorization is on the COMPOSED PAGE, not the origin
+
+When you `POST`/`PUT`/`DELETE` a stamped/included element (e.g. a comment into a
+stamped comments list), authorize it on the **composed page path you address**
+(e.g. `/posts/*`), NOT the data origin (`/data/posts/*`). The origin needs no
+public write rule — and shouldn't have one. (Shape constraints & ETags, however,
+*do* evaluate against the origin.) Always POST to the **stamped/composed
+resource**, never the raw data path.
+
+### Parameterized routes (`/posts/:slug.html`)
+
+- A whole-document `GET` with no literal doc resolves the route and exposes
+  `request.params.<name>`.
+- **Selector writes** (`Range: selector=…`) to a concrete route URL resolve the
+  route and write **through to the stamped/included origin** — this is how a
+  comment POSTed to `/posts/hello.html` reaches the post's data file.
+- Whole-document writes are **literal** (they edit the template doc itself).
+
+### Authenticated identity IS available to composition
+
+Use `request.auth.claims.email`, `request.auth.claims.name`,
+`request.auth.username` (= OIDC `sub`) in expression bindings / templates. The
+**bare** `auth.claims.*` is authorization-rule context only and throws
+`undefined variable` in a binding. Anonymous → empty/falsy.
+
+- Gate author-only content with a ternary binding, e.g.
+  `e:post="request.auth.claims.email ? ${…any…}.first() : ${…published-only…}.first()"`.
+- Actor model: `:username` matches **any authenticated user**; `actor` also
+  matches OIDC roles, which include the user's email and group claims. End-user
+  login is the per-host `OIDCAuthentication` feature (configurable
+  `login-path`/`logout-path`/`callback`). A `pk_` key is **not** an OIDC end-user
+  session — you can't reach an authenticated-only composed page with it; only the
+  user, in a browser, can verify those paths.
+
+### Triggers vs Processors (Sessel automation)
+
+- **Trigger** fires **before** core processing — `Context.request` only (method,
+  path, headers, query, body); **no decoded auth claims**. Can throw an
+  `HTTPResponse` to short-circuit.
+- **Processor** fires **after** — `Context.request` **and** `Context.response`
+  (read/set `.status`, `.body`, `.headers`). Use a processor to turn a soft-200
+  "not found" composition into a **real 404** (match `status: 200`, then
+  `when` checks the body lacks your content marker, action sets `status = 404`).
+
+### Closed ShapeConstraint = validate untrusted writes
+
+To stop arbitrary HTML on a public write path (e.g. comments), add a **closed**
+`ShapeConstraint` (any `permit` makes it closed → only declared elements/attrs
+allowed, else `422`):
+
+- Tie permits to **elements**, not bare attributes: `strong[itemprop="author"]`,
+  not `[itemprop="author"]` (else `<script itemprop="author">` slips through).
+- Use **exact** class matching `[class="comment"]` (not `.comment`) so extra
+  classes can't ride along. Omit any `style`/`<style>`/`<link>` permit → no
+  styling can be injected.
+- The constraint fires when the **request target** matches its `selector` (the
+  element the `Range` selector hits). A whole-document admin `PUT` targets
+  `:root`, so it does **not** fire — only the granular write path is policed.
+- Cover the matched root element's own attributes via the `selector`
+  (`[itemprop="comments"][id][class]`).
+
+### Sessel-in-HTML & composition gotchas
+
+- Raw `<`/`>` (and sometimes `&&`) inside inline `<script type="text/sessel">`
+  can break the renderer. Avoid them: prefer declarative filters (e.g. a
+  Processor's `status` meta) over a Sessel `&&`; use `== false` over `!`.
+- `e:`/`r:` binding attributes are **stripped** from composed output — handy
+  marker that composition ran.
+
+### Liquid (this engine)
+
+- The `date` filter throws "unable to parse date input" — **don't use it**. Store
+  human date strings in the data (`displayDate`, `monthLabel`) and bind those;
+  sort by the ISO field (string sort = chronological).
+- Output must be **balanced** — you can't open a tag in one iteration/`{% if %}`
+  and close it in another. Emit self-contained fragments.
+- `{{ x | where: "status", "Published" }}` works for filtering bound collections.
+
+### Edge cache & verifying
+
+Composed pages are CDN-cached `cache-control: public, max-age=5`. When verifying a
+just-deployed change, append a unique `?cb=<n>` query string (distinct cache key)
+to read fresh.
+
+### Don't clobber live data when testing writes
+
+Write-tests mutate real data. **Snapshot the live origin via WebDAV first**
+(`curl "${WEBDAV}data/…" -H "$KEY" > /tmp/before.html`), run the test, then PUT
+that snapshot back. Never restore from your local seed — it's lossy if the live
+data has diverged (e.g. real comments added since).
+
+## Common mistakes
+
+| Mistake | Correct |
+| --- | --- |
+| Reading host data from `/` | Use `/console/index.html` (`/` is the landing page) |
+| Reading hosts without a selector | `Range: selector=[itemtype="urn:Host"]` (→ 206) |
+| Editing host config at `/organizations/<org>/<hid>.html` | Edit the inlined block on `/console/index.html` |
+| Mounting the host / `cp` to deploy | Whole-file `PUT`/`MKCOL` to the `webdav-url` (`:8081`) |
+| Element-level `:80` PUT for file authoring | Whole-file WebDAV `PUT` (`:8081`) preserves formatting |
+| Writing the API key to a file or commit | Session-only; never persist or echo |
+| Writing markup from memory | Fetch `DOCS_URL` for the feature first |
+| Mutating a shared host without asking | Confirm with the user before any write |
+| POSTing a write to the raw data path | POST to the **stamped/composed** resource; authz is on the composed page, not the origin |
+| Adding an origin write rule for write-through | Origin needs none — rule on the composed page path is necessary & sufficient |
+| `auth.claims.email` in a binding (errors) | Use `request.auth.claims.email` / `request.auth.username` |
+| Branching composition on login via a Trigger | Triggers have no claims; branch in a binding with `request.auth.*`, or set status in a Processor |
+| Expecting a real 404 from composition | Composition can't set status; flip it in a **Processor** |
+| Trusting a public write path to be well-formed | Add a **closed** `ShapeConstraint` (element-tied, exact-class permits) → 422 on junk |
+| Restoring live data from a local seed after a test | Snapshot the live origin via WebDAV first, restore that |
+| Verifying a deploy and seeing stale HTML | Edge cache `max-age=5`; append `?cb=<n>` to bust |
+| Assuming a `pk_` key can view authed-only pages | It's not an OIDC session; only the user (browser) can verify login paths |
