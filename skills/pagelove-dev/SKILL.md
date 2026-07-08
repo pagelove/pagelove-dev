@@ -56,13 +56,17 @@ curl -s -o /dev/null -w '%{http_code}\n' "$CONSOLE_URL/console/index.html" -H "$
 
 ## Step 2 — Discover the deployment target
 
-List the hosts (deployment targets) inlined on the console page:
+List the hosts (deployment targets) inlined on the console page. Fetch the
+**whole page** — do NOT add a `Range: selector=[itemtype="urn:Host"]` header. A
+`Range` selector returns only the **first** matching element (a single `206`
+block), so you'd silently see just one host when the account has many:
 
 ```bash
 curl -s "$CONSOLE_URL/console/index.html" -H "$KEY"
 ```
 
-Returns `200` and one block per host, e.g.:
+Returns `200` and **one block per host** — accounts commonly have several, so
+parse every `urn:Host` block, not just the first. e.g.:
 
 ```html
 <div itemscope itemtype="urn:Host">
@@ -325,7 +329,7 @@ data has diverged (e.g. real comments added since).
 | Mistake | Correct |
 | --- | --- |
 | Reading host data from `/` | Use `/console/index.html` (`/` is the landing page) |
-| Reading hosts without a selector | `Range: selector=[itemtype="urn:Host"]` (→ 206) |
+| Using a `Range: selector` to list hosts (returns only the FIRST match) | Fetch the whole page with NO `Range` header; parse every `urn:Host` block |
 | Editing host config at `/organizations/<org>/<hid>.html` | Edit the inlined block on `/console/index.html` |
 | Mounting the host / `cp` to deploy | Whole-file `PUT`/`MKCOL` to the `webdav-url` (`:8081`) |
 | Element-level `:80` PUT for file authoring | Whole-file WebDAV `PUT` (`:8081`) preserves formatting |
