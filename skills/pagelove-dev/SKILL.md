@@ -59,11 +59,10 @@ curl -s -o /dev/null -w '%{http_code}\n' "$CONSOLE_URL/console/index.html" -H "$
 List the hosts (deployment targets) inlined on the console page:
 
 ```bash
-curl -s "$CONSOLE_URL/console/index.html" -H "$KEY" \
-  -H 'Range: selector=[itemtype="urn:Host"]'
+curl -s "$CONSOLE_URL/console/index.html" -H "$KEY"
 ```
 
-Returns `206` and one block per host, e.g.:
+Returns `200` and one block per host, e.g.:
 
 ```html
 <div itemscope itemtype="urn:Host">
@@ -77,6 +76,8 @@ Returns `206` and one block per host, e.g.:
   <meta itemprop="webdav-url" content="http://yf7v1uzt.test:8081/">
 </div>
 ```
+
+Each host is HTML microdata where the itemtype is urn:Host.
 
 Fields: `hid`, `hostname`, `org`, `webdav-url` (deploy endpoint),
 `default-get-authz-mode` (`allow` = public GET; `deny` = GET needs an auth rule),
