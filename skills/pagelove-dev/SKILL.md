@@ -361,7 +361,7 @@ data has diverged (e.g. real comments added since).
 | Reading host data from `/` | Use `/console/index.html` (`/` is the landing page) |
 | Using a `Range: selector` to list hosts (returns only the FIRST match) | Fetch the whole page with NO `Range` header; parse every `urn:Host` block |
 | Editing host config at `/organizations/<org>/<hid>.html` | Edit the inlined block on `/console/index.html` |
-| Guessing an authoring URL or deploying to the public hostname | Use the selected host's exact `webdav-url` |
+| Deriving an authoring URL from the public hostname | Use the selected host's exact advertised `webdav-url` |
 | Using element-level public writes for file authoring | Use whole-file WebDAV `PUT`/`MKCOL` operations |
 | Writing the API key to a file or commit | Session-only; never persist or echo |
 | Writing markup from memory | Fetch `DOCS_URL` for the feature first |
