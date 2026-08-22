@@ -43,6 +43,23 @@ A public `GET 200` does **not** validate the API key because the page may allow
 anonymous reads. Never guess the WebDAV hostname from the public hostname; use
 the exact `webdav-url` returned by the console.
 
+## Command environment
+
+Determine the operating system and active shell from the execution environment
+before running commands. Do not ask the user when this can be detected.
+
+- **macOS or Linux:** use the `bash` examples with Bash or Zsh.
+- **Windows:** use PowerShell 5.1 or PowerShell 7+ and invoke `curl.exe`
+  explicitly. Do not paste Bash syntax into PowerShell.
+
+All environments need curl 7.76.0 or newer for `--fail-with-body`. Before
+authenticating, run the prerequisite check and shell-specific setup in
+[Cross-platform command recipes](references/cross-platform-command-recipes.md).
+That reference mirrors every command-heavy step for POSIX shells and PowerShell,
+including temporary backups, conditional writes, read-back comparison, and
+public verification. The HTTP methods, URLs, headers, expected statuses, and
+safety requirements are identical on every platform; only shell syntax differs.
+
 ## Step 1 — Authenticate (do this first)
 
 Ask the user for their Pagelove console API key (starts with `pk_`). If the user doesn't
@@ -50,31 +67,12 @@ have an API key, ask them to create one by going to the credentials page in the 
 and hitting the "Generate API Key" button, before copying and pasting it into the session.
 One way or another, hold the API key for the session only: **never write it to a file, never
 echo it back, never commit it.** Have the user set `PAGELOVE_API_KEY` in the
-current shell or inject it through the execution environment. Then set the
-constants without putting the literal key in command history:
-
-```bash
-CONSOLE_URL='https://config.onpagelove.com'
-KEY="Authorization: Bearer ${PAGELOVE_API_KEY:?Set PAGELOVE_API_KEY for this shell}"
-```
-
-On Windows PowerShell, call `curl.exe` explicitly because `curl` may be an alias.
-Also remember that a long-running agent or terminal does not inherit environment
+current shell or inject it through the execution environment. Use the complete
+shell-specific setup and validation recipe in
+[Authenticate](references/cross-platform-command-recipes.md#authenticate).
+Remember that a long-running agent or terminal does not inherit environment
 changes made after it started. If validation unexpectedly returns `401`, confirm
-the current process received the intended value without printing the key. When
-appropriate, read the user-scoped value explicitly:
-
-```powershell
-$env:PAGELOVE_API_KEY = [Environment]::GetEnvironmentVariable('PAGELOVE_API_KEY', 'User')
-$KEY = "Authorization: Bearer $env:PAGELOVE_API_KEY"
-```
-
-Validate it:
-
-```bash
-curl --fail-with-body -sS -o /dev/null -w '%{http_code}\n' \
-  "$CONSOLE_URL/console/index.html" -H "$KEY"
-```
+the current process received the intended value without printing the key.
 
 - `200` → key works, continue.
 - `401` → tell the user the key was rejected and ask again. Do not proceed.
@@ -88,11 +86,9 @@ curl --fail-with-body -sS -o /dev/null -w '%{http_code}\n' \
 List the hosts (deployment targets) inlined on the console page. Fetch the
 **whole page** — do NOT add a `Range: selector=[itemtype="urn:Host"]` header. A
 `Range` selector returns only the **first** matching element (a single `206`
-block), so you'd silently see just one host when the account has many:
-
-```bash
-curl --fail-with-body -sS "$CONSOLE_URL/console/index.html" -H "$KEY"
-```
+block), so you'd silently see just one host when the account has many. Use
+[Discover hosts](references/cross-platform-command-recipes.md#discover-hosts)
+for the selected shell, including safe status and response-body capture.
 
 Returns `200` and **one block per host** — accounts commonly have several, so
 parse every `urn:Host` block, not just the first. e.g.:
@@ -118,21 +114,10 @@ Fields: `hid`, `hostname`, `org`, `webdav-url` (deploy endpoint),
 pick one, or create a new one.
 
 **Create a host** (the only console action NOT done by editing the page). First
-read the org id:
-
-```bash
-curl --fail-with-body -sS "$CONSOLE_URL/console/index.html" -H "$KEY" \
-  -H 'Range: selector=[itemtype="urn:console:User"] [itemprop="oid"]'
-```
-
-Then POST the template with that org id:
-
-```bash
-curl --fail-with-body -sS "$CONSOLE_URL/console/templates/new-host.html" -X POST -H "$KEY" \
-  --data 'org=ORG_ID_HERE'
-```
-
-The response is the new `urn:Host` block (with its `hostname` and `webdav-url`).
+read the org id, then POST the template with that org id. Use
+[Create a host](references/cross-platform-command-recipes.md#create-a-host) for
+the selected shell. The response is the new `urn:Host` block with its `hostname`
+and exact `webdav-url`.
 
 ## Step 3 — Clarify the app
 
@@ -183,37 +168,13 @@ Use `If-None-Match: *` when a write must create a new file rather than replace a
 existing one. Upload dependencies and assets first, then entry HTML last so a
 page does not reference files that are not yet available.
 
-```bash
-WEBDAV='REPLACE_WITH_EXACT_ADVERTISED_WEBDAV_URL'
+Use the complete deployment recipe for the active environment:
 
-# Inspect what's there (read-only)
-curl --fail-with-body -sS -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'
+- [Deploy safely with macOS or Linux](references/cross-platform-command-recipes.md#deploy-safely-with-macos-or-linux)
+- [Deploy safely with PowerShell](references/cross-platform-command-recipes.md#deploy-safely-with-powershell)
 
-# If index.html already exists, snapshot the REMOTE copy before overwriting it
-BACKUP_DIR="$(mktemp -d)"
-BACKUP_STATUS="$(curl -sS -o "${BACKUP_DIR}/index.html" -w '%{http_code}' \
-  "${WEBDAV}index.html" -H "$KEY")"
-case "$BACKUP_STATUS" in
-  200) ;; # rollback snapshot captured
-  404) rm -f "${BACKUP_DIR}/index.html" ;; # new file; nothing to snapshot
-  *) cat "${BACKUP_DIR}/index.html" >&2; exit 1 ;;
-esac
-
-# Create a missing directory before putting files into it
-curl --fail-with-body -sS -X MKCOL "${WEBDAV}admin/" -H "$KEY"
-
-# Write a whole file and capture both status and body. For an existing file,
-# also pass: -H "If-Match: $REMOTE_CONTENT_ETAG"
-PUT_BODY="$(mktemp)"
-PUT_STATUS="$(curl -sS -o "$PUT_BODY" -w '%{http_code}' \
-  -X PUT "${WEBDAV}index.html" -H "$KEY" \
-  -H 'Content-Type: text/html' --data-binary @index.html)"
-
-case "$PUT_STATUS" in
-  200|201|204) ;; # success: existing or newly created resource
-  *) cat "$PUT_BODY" >&2; exit 1 ;;
-esac
-```
+Both recipes perform the same read-only inventory, remote snapshot, ETag lookup,
+conditional write, and status/body checks.
 
 Deploy failure handling:
 - `401 Bearer token rejected` → validate the same key against
@@ -237,30 +198,16 @@ bounded backoff and a clear stop condition.
 
 ## Step 7 — Verify
 
-Read the **entire** file back over WebDAV and compare it with the local source:
-
-```bash
-REMOTE_COPY="$(mktemp)"
-curl --fail-with-body -sS "${WEBDAV}index.html" -H "$KEY" -o "$REMOTE_COPY"
-if ! diff -u index.html "$REMOTE_COPY"; then
-  echo 'Inspect the read-back diff before continuing.' >&2
-fi
-
-# WebDAV PROPFIND responses use 207 Multi-Status; 207 is a success response
-curl --fail-with-body -sS -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'
-```
+Read the **entire** file back over WebDAV and compare it with the local source
+using
+[Verify the WebDAV read-back](references/cross-platform-command-recipes.md#verify-the-webdav-read-back).
 
 An empty diff is ideal. Investigate any non-empty diff before continuing; never
 assume a partial or changed read-back is equivalent to the intended source.
 
-Then verify the public application separately with a unique cache-busting query:
-
-```bash
-PUBLIC='https://PUBLIC_HOSTNAME/'
-CACHE_BUSTER="$(date +%s)"
-PUBLIC_COPY="$(mktemp)"
-curl --fail-with-body -sS "${PUBLIC}?cb=${CACHE_BUSTER}" -o "$PUBLIC_COPY"
-```
+Then verify the public application separately with a unique cache-busting query.
+Use
+[Verify the public application](references/cross-platform-command-recipes.md#verify-the-public-application).
 
 Check required content markers, fetch every newly referenced public asset, and
 exercise the primary interaction through the public endpoint. WebDAV success
@@ -276,18 +223,12 @@ When the console contains multiple hosts, first prove that the selector
 identifies only the selected host. Never run a broad
 `[itemtype="urn:Host"]` mutation unchanged because it may update the first match.
 
-```bash
-# Change a single setting (replace its element)
-HOST_SETTING_SELECTOR='REPLACE_WITH_SELECTOR_VERIFIED_TO_MATCH_ONE_SETTING'
-curl --fail-with-body -sS -X PUT "$CONSOLE_URL/console/index.html" -H "$KEY" \
-  -H "Range: selector=${HOST_SETTING_SELECTOR}" \
-  -H 'Content-Type: text/html' \
-  --data '<meta itemprop="default-get-authz-mode" content="deny">'
-```
-
 Add an `alias` where none exists with `POST` (insert a new `<meta itemprop="alias">`
 into the host block); change an existing one with `PUT` against its selector.
 Verify the exact selector against the live block first.
+
+For complete macOS/Linux and PowerShell requests, use
+[Update one host setting](references/cross-platform-command-recipes.md#update-one-host-setting).
 
 ## Mental model (for writing markup)
 
