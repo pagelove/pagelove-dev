@@ -11,11 +11,12 @@ Edit these when the endpoints change. They are the ONLY environment-specific
 values in this skill.
 
 - `CONSOLE_URL` = `https://config.onpagelove.com`
-- `DOCS_URL` = `https://docs.pagelove.com/`
+- `DOCS_URL` = `https://docs.pagelove.com/all/`
 
-`CONSOLE_URL` is the Pagelove console origin. `DOCS_URL` is the single
-all-in-one documentation page (the entire spec on one page) — fetch THIS URL and
-focus on the relevant section; do not invent per-feature sub-URLs.
+`CONSOLE_URL` is the Pagelove console origin. `DOCS_URL` is the
+machine-readable documentation index. It links to complete, machine-readable
+section pages; fetch the index, then the section that covers the feature you are
+implementing.
 
 ## Overview
 
@@ -28,24 +29,50 @@ You drive everything in this skill with `curl` and one credential: the user's
 **console API key** (`pk_…`), sent as `Authorization: Bearer <key>`. The same key
 reads/writes the console AND authors files on a host over WebDAV.
 
+Keep the three service surfaces separate:
+
+1. **Console/control plane** — `${CONSOLE_URL}/console/index.html`; validates the
+   key, lists hosts, and exposes each host's exact `webdav-url`.
+2. **WebDAV/authoring plane** — the advertised `webdav-url`; use it for
+   authenticated whole-file `GET`, `PUT`, `MKCOL`, and `PROPFIND` operations.
+3. **Public application plane** — the host's public `hostname`; this is where
+   application authorization, validation, composition, caching, and end-user
+   behavior must be verified.
+
+A public `GET 200` does **not** validate the API key because the page may allow
+anonymous reads. Never guess the WebDAV hostname from the public hostname; use
+the exact `webdav-url` returned by the console.
+
+## Command environment
+
+Determine the operating system and active shell from the execution environment
+before running commands. Do not ask the user when this can be detected.
+
+- **macOS or Linux:** use the `bash` examples with Bash or Zsh.
+- **Windows:** use PowerShell 5.1 or PowerShell 7+ and invoke `curl.exe`
+  explicitly. Do not paste Bash syntax into PowerShell.
+
+All environments need curl 7.76.0 or newer for `--fail-with-body`. Before
+authenticating, run the prerequisite check and shell-specific setup in
+[Cross-platform command recipes](references/cross-platform-command-recipes.md).
+That reference mirrors every command-heavy step for POSIX shells and PowerShell,
+including temporary backups, conditional writes, read-back comparison, and
+public verification. The HTTP methods, URLs, headers, expected statuses, and
+safety requirements are identical on every platform; only shell syntax differs.
+
 ## Step 1 — Authenticate (do this first)
 
 Ask the user for their Pagelove console API key (starts with `pk_`). If the user doesn't
 have an API key, ask them to create one by going to the credentials page in the console,
 and hitting the "Generate API Key" button, before copying and pasting it into the session.
 One way or another, hold the API key for the session only: **never write it to a file, never
-echo it back, never commit it.** Set it (and the constants) for the session:
-
-```bash
-CONSOLE_URL='https://config.onpagelove.com'
-KEY='Authorization: Bearer pk_REPLACE_WITH_USER_KEY'
-```
-
-Validate it:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' "$CONSOLE_URL/console/index.html" -H "$KEY"
-```
+echo it back, never commit it.** Have the user set `PAGELOVE_API_KEY` in the
+current shell or inject it through the execution environment. Use the complete
+shell-specific setup and validation recipe in
+[Authenticate](references/cross-platform-command-recipes.md#authenticate).
+Remember that a long-running agent or terminal does not inherit environment
+changes made after it started. If validation unexpectedly returns `401`, confirm
+the current process received the intended value without printing the key.
 
 - `200` → key works, continue.
 - `401` → tell the user the key was rejected and ask again. Do not proceed.
@@ -59,11 +86,9 @@ curl -s -o /dev/null -w '%{http_code}\n' "$CONSOLE_URL/console/index.html" -H "$
 List the hosts (deployment targets) inlined on the console page. Fetch the
 **whole page** — do NOT add a `Range: selector=[itemtype="urn:Host"]` header. A
 `Range` selector returns only the **first** matching element (a single `206`
-block), so you'd silently see just one host when the account has many:
-
-```bash
-curl -s "$CONSOLE_URL/console/index.html" -H "$KEY"
-```
+block), so you'd silently see just one host when the account has many. Use
+[Discover hosts](references/cross-platform-command-recipes.md#discover-hosts)
+for the selected shell, including safe status and response-body capture.
 
 Returns `200` and **one block per host** — accounts commonly have several, so
 parse every `urn:Host` block, not just the first. e.g.:
@@ -89,21 +114,10 @@ Fields: `hid`, `hostname`, `org`, `webdav-url` (deploy endpoint),
 pick one, or create a new one.
 
 **Create a host** (the only console action NOT done by editing the page). First
-read the org id:
-
-```bash
-curl -s "$CONSOLE_URL/console/index.html" -H "$KEY" \
-  -H 'Range: selector=[itemtype="urn:console:User"] [itemprop="oid"]'
-```
-
-Then POST the template with that org id:
-
-```bash
-curl -s "$CONSOLE_URL/console/templates/new-host.html" -X POST -H "$KEY" \
-  --data 'org=ORG_ID_HERE'
-```
-
-The response is the new `urn:Host` block (with its `hostname` and `webdav-url`).
+read the org id, then POST the template with that org id. Use
+[Create a host](references/cross-platform-command-recipes.md#create-a-host) for
+the selected shell. The response is the new `urn:Host` block with its `hostname`
+and exact `webdav-url`.
 
 ## Step 3 — Clarify the app
 
@@ -113,92 +127,108 @@ install the superpowers skill if it is not already installed.
 
 ## Step 4 — Fetch docs before writing markup (REQUIRED)
 
-Before writing markup for a feature, fetch `DOCS_URL` with a `WebFetch` prompt
-focused on that feature. All content is on the one page; the table below maps a
-feature to the section heading to look for. **Do not write Pagelove markup from
-memory — attribute names and vocab URLs must come from the docs.**
+Before writing Pagelove-specific markup, fetch `DOCS_URL`, then fetch the
+complete section page for the feature. **Do not write Pagelove markup from
+memory — attribute names, behavior, and vocabulary URLs must come from the
+current docs.**
 
-| Feature | Look for section |
+| Feature | Machine-readable section |
 | --- | --- |
-| GET/PUT/POST/DELETE/OPTIONS over selectors | Reading and Writing / methods |
-| Server-Sent Events | Server-Sent-Events |
-| Content negotiation | Content Negotiation |
-| Who-can-do-what | AuthorizationRule |
-| Typed/validated data | Schema, Property, Types, Resolvers |
-| DOM structure validation | ShapeConstraint, GroupConstraint |
-| Server-side automation | Trigger, Processor, HTTPRequest |
-| Page composition | Templating, Includes, Resource/Expression Binding, Resource Creation, Selector Extensions, Filters, Transient Elements, Pagination |
-| Filesystem authoring | WebDAV |
-| Client JS library | the JavaScript library / pagelove.mjs |
-| Expression language | Sessel |
+| Selector reads and writes, content negotiation, SSE | `https://docs.pagelove.com/all/reference/reading-and-writing/` |
+| Page composition and templates | `https://docs.pagelove.com/all/reference/composing-pages/` |
+| Schemas, properties, types, and shape constraints | `https://docs.pagelove.com/all/reference/modeling-data/` |
+| Authorization rules and groups | `https://docs.pagelove.com/all/reference/permissions/` |
+| Triggers, processors, HTTP requests, and transitions | `https://docs.pagelove.com/all/reference/reacting-to-changes/` |
+| WebDAV and protocol details | `https://docs.pagelove.com/all/reference/protocol/` |
+| Sessel, JavaScript, or Liquid | the matching URL under `https://docs.pagelove.com/all/languages/` |
 
 ## Step 5 — Build files locally
 
 Author full HTML files in a local working directory first (e.g. `index.html`,
-`admin/auth.html`, schema pages). Pagelove is **deny-by-default** — define an
-`AuthorizationRule` for every element you intend to read or mutate (a public
-page needs an actor `*`, method `GET`, action `allow` rule).
+`admin/auth.html`, schema pages). Mutations require matching authorization.
+Unmatched `GET`/`HEAD` requests follow the host's `default-get-authz-mode`, so
+read the host setting and define explicit rules whenever access should not rely
+on that default.
 
 ## Step 6 — Deploy over WebDAV
 
-Deploy to the host's `webdav-url` (e.g. `http://<hostname>:8081/`) using the
-same API key. WebDAV writes **whole files and preserves formatting** — this is
-the deploy path. (Do NOT mount the host or use element-level `:80` PUTs for
-file authoring; element-level `:80` PUTs re-serialize and flatten to one line.)
-
-```bash
-WEBDAV='http://yf7v1uzt.test:8081/'   # the host's webdav-url, verbatim
-
-# Inspect what's there (read-only)
-curl -s -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'
-
-# Create a directory before putting files into it
-curl -s -X MKCOL "${WEBDAV}admin/" -H "$KEY"
-
-# Write a whole file (formatting preserved)
-curl -s -X PUT "${WEBDAV}index.html" -H "$KEY" \
-  -H 'Content-Type: text/html' --data-binary @index.html
-```
-
-Deploy failure handling:
-- `401 Bearer token rejected` → this console's WebDAV does not yet accept the API
-  key. Tell the user the deploy capability isn't enabled on this console; stop.
-- `409 Conflict` → a parent collection is missing; `MKCOL` it first, then retry.
-- Any other non-2xx → report the HTTP status and body; do not assume success.
+Deploy to the host's exact `webdav-url` using the same API key. Copy the value
+verbatim; do not derive it from the public hostname or send authoring writes to
+the public application URL. WebDAV is the file-level authoring interface.
 
 Mutating a host changes a shared deployment target — confirm with the user before
-the first `PUT`/`MKCOL`.
+the first `PUT`/`MKCOL`. The mount is the live site and another writer may change
+a file after it is read. Before replacing an existing file:
+
+1. Download the current remote file to a temporary rollback location.
+2. Record its content ETag from the file's `PROPFIND` response.
+3. Send that ETag in `If-Match` on the `PUT`; stop and re-read on a conflict.
+
+Use `If-None-Match: *` when a write must create a new file rather than replace an
+existing one. Upload dependencies and assets first, then entry HTML last so a
+page does not reference files that are not yet available.
+
+Use the complete deployment recipe for the active environment:
+
+- [Deploy safely with macOS or Linux](references/cross-platform-command-recipes.md#deploy-safely-with-macos-or-linux)
+- [Deploy safely with PowerShell](references/cross-platform-command-recipes.md#deploy-safely-with-powershell)
+
+Both recipes perform the same read-only inventory, remote snapshot, ETag lookup,
+conditional write, and status/body checks.
+
+Deploy failure handling:
+- `401 Bearer token rejected` → validate the same key against
+  `/console/index.html`. If that also returns `401`, the key/current process
+  environment is wrong; stop. If the console returns `200`, re-fetch all host
+  blocks, re-select the intended host, and retry a read-only `PROPFIND` against
+  its exact `webdav-url`. Only then report a host capability/authentication issue.
+- `400 Bad Request` → inspect the error body for an unacceptable path.
+- `409 Conflict` or `412 Precondition Failed` → a concurrent change won. Re-read
+  the resource and its ETag before deciding whether to retry.
+- `422 Unprocessable Content` → the content violates a schema or constraint.
+- `503 Service Unavailable` → transient storage failure; retry with bounded
+  backoff.
+- `507 Insufficient Storage` → the request exhausted its allowance; stop.
+- Any other non-2xx → report the HTTP status and structured error body; do not
+  assume success.
+
+Do not retry an unchanged deterministic `4xx` on a timer. Retry only documented
+transient failures, transport timeouts, or other retryable `5xx` responses, with
+bounded backoff and a clear stop condition.
 
 ## Step 7 — Verify
 
-Read the file back over WebDAV (most reliable across environments):
+Read the **entire** file back over WebDAV and compare it with the local source
+using
+[Verify the WebDAV read-back](references/cross-platform-command-recipes.md#verify-the-webdav-read-back).
 
-```bash
-curl -s "${WEBDAV}index.html" -H "$KEY" | head
-curl -s -X PROPFIND "${WEBDAV}" -H "$KEY" -H 'Depth: 1'   # file now listed
-```
+An empty diff is ideal. Investigate any non-empty diff before continuing; never
+assume a partial or changed read-back is equivalent to the intended source.
 
-If the host is publicly served, you can also GET the live site
-(`curl -s -o /dev/null -w '%{http_code}\n' "http://<hostname>/"`), but in some
-dev setups the `:80` edge proxy rejects unregistered hostnames — prefer the
-WebDAV read-back. Report results honestly, including any non-2xx response.
+Then verify the public application separately with a unique cache-busting query.
+Use
+[Verify the public application](references/cross-platform-command-recipes.md#verify-the-public-application).
+
+Check required content markers, fetch every newly referenced public asset, and
+exercise the primary interaction through the public endpoint. WebDAV success
+does not test application `AuthorizationRule`, `ShapeConstraint`, `Trigger`, or
+`Processor` behavior. Report the operation statuses, read-back diff, and public
+verification honestly; do not claim deployment success before all three pass.
 
 ## Step 8 — Host-config tweaks (optional)
 
 Modify host settings by editing the inlined block on `/console/index.html` (NOT
 `/organizations/...`). Confirm with the user before mutating a shared host.
-
-```bash
-# Change a single setting (replace its element)
-curl -s -X PUT "$CONSOLE_URL/console/index.html" -H "$KEY" \
-  -H 'Range: selector=[itemtype="urn:Host"] [itemprop="default-get-authz-mode"]' \
-  -H 'Content-Type: text/html' \
-  --data '<meta itemprop="default-get-authz-mode" content="deny">'
-```
+When the console contains multiple hosts, first prove that the selector
+identifies only the selected host. Never run a broad
+`[itemtype="urn:Host"]` mutation unchanged because it may update the first match.
 
 Add an `alias` where none exists with `POST` (insert a new `<meta itemprop="alias">`
 into the host block); change an existing one with `PUT` against its selector.
 Verify the exact selector against the live block first.
+
+For complete macOS/Linux and PowerShell requests, use
+[Update one host setting](references/cross-platform-command-recipes.md#update-one-host-setting).
 
 ## Mental model (for writing markup)
 
@@ -331,8 +361,8 @@ data has diverged (e.g. real comments added since).
 | Reading host data from `/` | Use `/console/index.html` (`/` is the landing page) |
 | Using a `Range: selector` to list hosts (returns only the FIRST match) | Fetch the whole page with NO `Range` header; parse every `urn:Host` block |
 | Editing host config at `/organizations/<org>/<hid>.html` | Edit the inlined block on `/console/index.html` |
-| Mounting the host / `cp` to deploy | Whole-file `PUT`/`MKCOL` to the `webdav-url` (`:8081`) |
-| Element-level `:80` PUT for file authoring | Whole-file WebDAV `PUT` (`:8081`) preserves formatting |
+| Deriving an authoring URL from the public hostname | Use the selected host's exact advertised `webdav-url` |
+| Using element-level public writes for file authoring | Use whole-file WebDAV `PUT`/`MKCOL` operations |
 | Writing the API key to a file or commit | Session-only; never persist or echo |
 | Writing markup from memory | Fetch `DOCS_URL` for the feature first |
 | Mutating a shared host without asking | Confirm with the user before any write |
