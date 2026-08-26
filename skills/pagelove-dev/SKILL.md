@@ -232,127 +232,75 @@ For complete macOS/Linux and PowerShell requests, use
 
 ## Mental model (for writing markup)
 
-- A **resource** is an HTML page; HTTP methods target **elements** via
-  `Range: selector=<css>`.
-- **AuthorizationRule** microdata controls who can do what to which elements
-  (deny-by-default).
-- **Schema** + **Property** validate typed data; **ShapeConstraint** validates
-  DOM structure on mutations.
-- **Trigger**/**Processor** run **Sessel** expressions before/after a request.
-- **pagelove.mjs** gives declarative two-way binding; **SSE** streams mutations.
-- Microdata vocab URLs are `https://pagelove.org/<Thing>` (e.g.
-  `AuthorizationRule`, `Schema`, `Property`, `Trigger`, `Processor`, `Sessel`).
+- A **resource** is an HTML document; HTTP methods can target the document or
+  elements selected with `Range: selector=<css>`.
+- **AuthorizationRule** items match actor, resource path, method, and optionally
+  a selector. Unmatched mutations are denied; unmatched `GET`/`HEAD` requests
+  follow the host's default-GET mode.
+- **Schema** and **Property** govern typed data. **ShapeConstraint** governs DOM
+  structure. **TransitionConstraint** governs allowed state changes.
+- **Trigger** runs before core request processing. **Processor** runs after core
+  processing and before the response is sent.
+- Page composition, `pagelove.mjs`, and Server-Sent Events provide server-side
+  rendering, client binding, and live mutation updates.
 
-Fetch `DOCS_URL` for exact syntax — do not guess attribute names.
+Use the current machine-readable documentation for exact syntax:
 
-## Verified patterns & gotchas
+- [Composing pages](https://docs.pagelove.com/all/reference/composing-pages/)
+- [Permissions](https://docs.pagelove.com/all/reference/permissions/)
+- [Modeling data](https://docs.pagelove.com/all/reference/modeling-data/)
+- [Reacting to changes](https://docs.pagelove.com/all/reference/reacting-to-changes/)
 
-Battle-tested on real builds. Still fetch `DOCS_URL` for syntax — these are the
-things the docs under-state or get subtly wrong.
+## Implementation safeguards
 
-### Composition runs with ELEVATED rights
+### Treat composition as a disclosure boundary
 
-A `<p:stamp>`/`<p:include>`/binding composes a page by reading other documents
-**even when the requester cannot directly GET them**. (Verified: a public page
-that stamps a doc which denies anonymous GET still renders that doc for anon.)
+Resource bindings query the entire site graph without per-request authorization.
+Treat authorship of a composed page as read access over the host, select only the
+data the page should disclose, and inspect the rendered anonymous response before
+publishing it.
 
-- This is the idiom for **private data + curated views**: keep raw data private
-  with `deny * GET /data/*` (+ `allow :username GET /data/*` for the editor), and
-  the composed pages (param route, home, index) still render because they compose
-  server-side. Visitors can only reach data through the views you build.
-- Note: this contradicts the Resource-Binding doc's "binding succeeds only if the
-  request has access" line — empirically composition is **not** requester-scoped.
+### Match authorization rules deliberately
 
-### Write-through authorization is on the COMPOSED PAGE, not the origin
+- Use `users` (or its `authenticated` alias) for any signed-in principal.
+  `:username` is deprecated and has different conflict-resolution specificity,
+  so review competing rules when migrating it.
+- Use selector-scoped rules for element-level access. A single-result read and an
+  all-results read authorize different match sets; test the same `Accept` header
+  and selector shape the application will use.
+- Dynamic `actor`, `resource`, and `selector` values use `${path.to.value}`.
+  Liquid syntax such as `{{ ... }}` is literal text in authorization fields.
+- In composition, authenticated identity is available through
+  `request.auth.claims.*` and `request.auth.username`. Reading identity-specific
+  request fields makes the response private and excludes it from shared caches.
 
-When you `POST`/`PUT`/`DELETE` a stamped/included element (e.g. a comment into a
-stamped comments list), authorize it on the **composed page path you address**
-(e.g. `/posts/*`), NOT the data origin (`/data/posts/*`). The origin needs no
-public write rule — and shouldn't have one. (Shape constraints & ETags, however,
-*do* evaluate against the origin.) Always POST to the **stamped/composed
-resource**, never the raw data path.
+### Use the correct request phase
 
-### Parameterized routes (`/posts/:slug.html`)
+- A Trigger runs before core processing and has no `Context.response`.
+- A Processor runs after core processing and can inspect or replace the response.
+  Sessel processor actions can mutate `Context.response`; JavaScript processor
+  actions must throw an `HTTPResponse` to replace it.
 
-- A whole-document `GET` with no literal doc resolves the route and exposes
-  `request.params.<name>`.
-- **Selector writes** (`Range: selector=…`) to a concrete route URL resolve the
-  route and write **through to the stamped/included origin** — this is how a
-  comment POSTed to `/posts/hello.html` reaches the post's data file.
-- Whole-document writes are **literal** (they edit the template doc itself).
+### Validate untrusted writes at storage boundaries
 
-### Authenticated identity IS available to composition
+- A `ShapeConstraint` becomes closed as soon as it declares a `permit`. In a
+  closed shape, explicitly permit every allowed descendant and attribute; other
+  content is rejected with `422`.
+- `unique: "true"` is enforced across items of the governed type on the host.
+  Reusing a non-`true` value across properties declares a supported composite
+  uniqueness group.
+- An `@key` property must also be individually unique. Use stable keys when a
+  whole-document write contains multiple items of one governed type.
+- Once a `TransitionConstraint` watches a property, declare entry rules for
+  legal starting states and exit rules for legal deletion states. Handle `412`
+  race responses by re-reading before retrying.
 
-Use `request.auth.claims.email`, `request.auth.claims.name`,
-`request.auth.username` (= OIDC `sub`) in expression bindings / templates. The
-**bare** `auth.claims.*` is authorization-rule context only and throws
-`undefined variable` in a binding. Anonymous → empty/falsy.
+### Verify the actual application boundary
 
-- Gate author-only content with a ternary binding, e.g.
-  `e:post="request.auth.claims.email ? ${…any…}.first() : ${…published-only…}.first()"`.
-- Actor model: `:username` matches **any authenticated user**; `actor` also
-  matches OIDC roles, which include the user's email and group claims. End-user
-  login is the per-host `OIDCAuthentication` feature (configurable
-  `login-path`/`logout-path`/`callback`). A `pk_` key is **not** an OIDC end-user
-  session — you can't reach an authenticated-only composed page with it; only the
-  user, in a browser, can verify those paths.
-
-### Triggers vs Processors (Sessel automation)
-
-- **Trigger** fires **before** core processing — `Context.request` only (method,
-  path, headers, query, body); **no decoded auth claims**. Can throw an
-  `HTTPResponse` to short-circuit.
-- **Processor** fires **after** — `Context.request` **and** `Context.response`
-  (read/set `.status`, `.body`, `.headers`). Use a processor to turn a soft-200
-  "not found" composition into a **real 404** (match `status: 200`, then
-  `when` checks the body lacks your content marker, action sets `status = 404`).
-
-### Closed ShapeConstraint = validate untrusted writes
-
-To stop arbitrary HTML on a public write path (e.g. comments), add a **closed**
-`ShapeConstraint` (any `permit` makes it closed → only declared elements/attrs
-allowed, else `422`):
-
-- Tie permits to **elements**, not bare attributes: `strong[itemprop="author"]`,
-  not `[itemprop="author"]` (else `<script itemprop="author">` slips through).
-- Use **exact** class matching `[class="comment"]` (not `.comment`) so extra
-  classes can't ride along. Omit any `style`/`<style>`/`<link>` permit → no
-  styling can be injected.
-- The constraint fires when the **request target** matches its `selector` (the
-  element the `Range` selector hits). A whole-document admin `PUT` targets
-  `:root`, so it does **not** fire — only the granular write path is policed.
-- Cover the matched root element's own attributes via the `selector`
-  (`[itemprop="comments"][id][class]`).
-
-### Sessel-in-HTML & composition gotchas
-
-- Raw `<`/`>` (and sometimes `&&`) inside inline `<script type="text/sessel">`
-  can break the renderer. Avoid them: prefer declarative filters (e.g. a
-  Processor's `status` meta) over a Sessel `&&`; use `== false` over `!`.
-- `e:`/`r:` binding attributes are **stripped** from composed output — handy
-  marker that composition ran.
-
-### Liquid (this engine)
-
-- The `date` filter throws "unable to parse date input" — **don't use it**. Store
-  human date strings in the data (`displayDate`, `monthLabel`) and bind those;
-  sort by the ISO field (string sort = chronological).
-- Output must be **balanced** — you can't open a tag in one iteration/`{% if %}`
-  and close it in another. Emit self-contained fragments.
-- `{{ x | where: "status", "Published" }}` works for filtering bound collections.
-
-### Edge cache & verifying
-
-Composed pages are CDN-cached `cache-control: public, max-age=5`. When verifying a
-just-deployed change, append a unique `?cb=<n>` query string (distinct cache key)
-to read fresh.
-
-### Don't clobber live data when testing writes
-
-Write-tests mutate real data. **Snapshot the live origin via WebDAV first**
-(`curl "${WEBDAV}data/…" -H "$KEY" > /tmp/before.html`), run the test, then PUT
-that snapshot back. Never restore from your local seed — it's lossy if the live
-data has diverged (e.g. real comments added since).
+Test anonymous, authenticated, selector-read, and mutation paths through the
+public application endpoint with the same headers the client will send. Use a
+disposable resource where possible; if a test must touch existing data, snapshot
+the live remote content first and restore that snapshot rather than a local seed.
 
 ## Common mistakes
 
@@ -366,12 +314,16 @@ data has diverged (e.g. real comments added since).
 | Writing the API key to a file or commit | Session-only; never persist or echo |
 | Writing markup from memory | Fetch `DOCS_URL` for the feature first |
 | Mutating a shared host without asking | Confirm with the user before any write |
-| POSTing a write to the raw data path | POST to the **stamped/composed** resource; authz is on the composed page, not the origin |
-| Adding an origin write rule for write-through | Origin needs none — rule on the composed page path is necessary & sufficient |
-| `auth.claims.email` in a binding (errors) | Use `request.auth.claims.email` / `request.auth.username` |
-| Branching composition on login via a Trigger | Triggers have no claims; branch in a binding with `request.auth.*`, or set status in a Processor |
-| Expecting a real 404 from composition | Composition can't set status; flip it in a **Processor** |
-| Trusting a public write path to be well-formed | Add a **closed** `ShapeConstraint` (element-tied, exact-class permits) → 422 on junk |
-| Restoring live data from a local seed after a test | Snapshot the live origin via WebDAV first, restore that |
+| Treating direct-GET denial as a composition privacy boundary | Review what the composed page exposes; bindings can read the whole host graph |
+| Using `:username` for any authenticated user | Use `users` and review conflict-resolution specificity when migrating |
+| Using `{{ ... }}` in an authorization field | Use `${request...}` lookups |
+| Expecting a Trigger to inspect the response | Use a Processor for post-processing |
+| Mutating `ctx.response` in a JavaScript Processor | Throw an `HTTPResponse` to replace the response |
+| Trusting an unvalidated public write path | Add a closed `ShapeConstraint` with explicit element and attribute permits |
+| Hand-rolling composite uniqueness | Give participating properties the same non-`true` `unique` group name |
+| Using several transition-governed items without stable keys | Add an individually unique `@key` property |
+| Declaring transitions without entry or exit rules | Add `to`-only entry rules and `from`-only exit rules where required |
+| Blindly retrying a transition race | On `412`, re-read the current state before retrying |
+| Restoring live data from a local seed after a test | Restore a snapshot of the live remote content |
 | Verifying a deploy and seeing stale HTML | Edge cache `max-age=5`; append `?cb=<n>` to bust |
 | Assuming a `pk_` key can view authed-only pages | It's not an OIDC session; only the user (browser) can verify login paths |
